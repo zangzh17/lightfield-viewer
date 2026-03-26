@@ -21,6 +21,10 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
 .ctrl { margin-bottom: 8px; }
 .ctrl label { display: block; margin-bottom: 2px; color: #999; font-size: 11px; }
 .ctrl input[type=range] { width: 100%; accent-color: #6a6; }
+.ctrl select {
+  width: 100%; background: #222; color: #ccc;
+  border: 1px solid #444; padding: 4px; border-radius: 3px; font-size: 12px;
+}
 .ctrl .val { float: right; color: #aaa; font-size: 11px; }
 
 #webcam-btn {
@@ -67,6 +71,11 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
 
 <div id="panel">
   <h3>SLIM Volume Viewer</h3>
+
+  <div class="ctrl">
+    <label>Dataset</label>
+    <select id="dataset"></select>
+  </div>
 
   <div class="ctrl">
     <label>Brightness <span class="val" id="v-bright">0.7</span></label>
@@ -187,16 +196,34 @@ const statusEl = document.getElementById('status');
 /* ================================================================
    Volume loading
    ================================================================ */
-async function loadVolume() {
-  const metaResp = await fetch('data/volume_meta.json');
+let datasets = [];
+
+async function loadDatasetList() {
+  const resp = await fetch('data/datasets.json');
+  if (!resp.ok) throw new Error('datasets.json not found');
+  datasets = await resp.json();
+  const sel = document.getElementById('dataset');
+  sel.innerHTML = '';
+  for (const ds of datasets) {
+    const opt = document.createElement('option');
+    opt.value = ds.id;
+    opt.textContent = ds.name;
+    sel.appendChild(opt);
+  }
+}
+
+async function loadVolume(datasetId) {
+  statusEl.textContent = 'Loading volume...';
+  const base = `data/${datasetId}`;
+  const metaResp = await fetch(`${base}/volume_meta.json`);
   if (!metaResp.ok) {
-    statusEl.textContent = 'volume_meta.json not found — run export_volume.py first';
+    statusEl.textContent = `${datasetId}: metadata not found`;
     throw new Error('no metadata');
   }
   const meta = await metaResp.json();
   const {width, height, depth} = meta;
 
-  const raw = await (await fetch('data/volume.raw')).arrayBuffer();
+  const raw = await (await fetch(`${base}/volume.raw`)).arrayBuffer();
   const data = new Uint8Array(raw);
 
   const tex = new THREE.Data3DTexture(data, width, height, depth);
@@ -208,8 +235,14 @@ async function loadVolume() {
   tex.unpackAlignment = 1;
   tex.needsUpdate = true;
 
-  statusEl.textContent = `Volume ${width}\u00d7${height}\u00d7${depth} loaded`;
+  statusEl.textContent = `${datasetId} ${width}\u00d7${height}\u00d7${depth} loaded`;
   return tex;
+}
+
+async function switchDataset(datasetId) {
+  const tex = await loadVolume(datasetId);
+  material.uniforms.uVolume.value.dispose();
+  material.uniforms.uVolume.value = tex;
 }
 
 /* ================================================================
@@ -358,6 +391,10 @@ function initUI() {
     orbitRadius = BASE_DIST / v;
     updateCamera();
   });
+  // dataset switch
+  document.getElementById('dataset').addEventListener('change', e => {
+    switchDataset(e.target.value);
+  });
   // webcam toggle
   document.getElementById('webcam-btn').addEventListener('click', () => {
     webcamStream ? stopTracking() : startTracking();
@@ -373,7 +410,8 @@ function initUI() {
    ================================================================ */
 async function main() {
   try {
-    const tex = await loadVolume();
+    await loadDatasetList();
+    const tex = await loadVolume(datasets[0].id);
     initScene(tex);
     initUI();
     (function loop() { requestAnimationFrame(loop); tickTracking(); renderer.render(scene, camera); })();
