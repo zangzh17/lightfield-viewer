@@ -21,10 +21,6 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
 .ctrl { margin-bottom: 8px; }
 .ctrl label { display: block; margin-bottom: 2px; color: #999; font-size: 11px; }
 .ctrl input[type=range] { width: 100%; accent-color: #6a6; }
-.ctrl select {
-  width: 100%; background: #222; color: #ccc;
-  border: 1px solid #444; padding: 3px; border-radius: 3px;
-}
 .ctrl .val { float: right; color: #aaa; font-size: 11px; }
 
 #webcam-btn {
@@ -47,16 +43,11 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
   #panel { display: none; top: 50px; right: 8px; left: 8px; width: auto; z-index: 10; }
   #panel.open { display: block; }
   #toggle-panel { display: flex; }
-  #info { top: auto; bottom: 32px; }
 }
 
 #status {
   position: fixed; bottom: 12px; left: 12px;
   color: #666; font-size: 11px; font-family: monospace;
-}
-#info {
-  position: fixed; top: 12px; left: 12px;
-  color: #555; font-size: 11px;
 }
 </style>
 </head>
@@ -83,6 +74,19 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
     <label>Z Scale <span class="val" id="v-zscale">0.20</span></label>
     <input type="range" id="zscale" min="0.05" max="2" step="0.05" value="0.2">
   </div>
+  <div class="ctrl">
+    <label>Zoom <span class="val" id="v-zoom">1.50</span></label>
+    <input type="range" id="zoom" min="0.5" max="4" step="0.1" value="1.5">
+  </div>
+  <div class="ctrl">
+    <label>Rotate H <span class="val" id="v-roth">0.0</span></label>
+    <input type="range" id="rot-h" min="-180" max="180" step="1" value="0">
+  </div>
+  <div class="ctrl">
+    <label>Rotate V <span class="val" id="v-rotv">0.0</span></label>
+    <input type="range" id="rot-v" min="-80" max="80" step="1" value="0">
+  </div>
+
   <hr style="border-color:#333; margin:10px 0;">
 
   <div class="ctrl">
@@ -96,7 +100,6 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
 <button id="toggle-panel">&#9881;</button>
 
 <div id="status">Loading volume...</div>
-<div id="info">Drag: rotate &bull; Scroll: zoom</div>
 
 <script type="importmap">
 {
@@ -133,13 +136,6 @@ uniform sampler3D uVolume;
 uniform float uBrightness;
 uniform float uGamma;
 uniform float uThreshold;
-uniform int uColorMode;
-
-vec3 hsv2rgb(vec3 c) {
-  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
 
 vec2 intersectBox(vec3 orig, vec3 dir) {
   vec3 inv = 1.0 / dir;
@@ -158,40 +154,33 @@ void main() {
   bounds.x = max(bounds.x, 0.0);
 
   float maxVal = 0.0;
-  float maxDepth = 0.0;
   const int STEPS = 256;
   float dt = (bounds.y - bounds.x) / float(STEPS);
 
   for (int i = 0; i < STEPS; i++) {
     vec3 p = vOrigin + rayDir * (bounds.x + float(i) * dt);
     vec3 tc = p + 0.5;
-    tc.y = 1.0 - tc.y;               // flip Y for image convention
+    tc.y = 1.0 - tc.y;
     float val = texture(uVolume, tc).r;
-    if (val > maxVal) { maxVal = val; maxDepth = tc.z; }
+    maxVal = max(maxVal, val);
   }
 
   if (maxVal < uThreshold) discard;
 
   float I = pow(clamp(maxVal * uBrightness, 0.0, 1.0), uGamma);
-
-  vec3 color;
-  if (uColorMode == 0)      color = vec3(I*0.15, I, I*0.12);   // fluorescence green
-  else if (uColorMode == 1) color = hsv2rgb(vec3(maxDepth*0.7, 0.85, I)); // depth-coded
-  else                       color = vec3(I);                    // grayscale
-
-  fragColor = vec4(color, 1.0);
+  fragColor = vec4(vec3(I), 1.0);
 }`;
 
 /* ================================================================
    App state
    ================================================================ */
 let camera, scene, renderer, mesh, material;
-let orbitTheta = 0, orbitPhi = Math.PI / 2, orbitRadius = 2.2;
+const BASE_DIST = 2.2;
+let orbitTheta = 0, orbitPhi = Math.PI / 2, orbitRadius = BASE_DIST / 1.5;
 let headOffsetX = 0, headOffsetY = 0;
 let smoothHeadX = 0, smoothHeadY = 0;
-let isDragging = false, lastMouse = {x:0, y:0};
 let faceLandmarker = null, webcamStream = null;
-const video   = document.getElementById('webcam');
+const video    = document.getElementById('webcam');
 const statusEl = document.getElementById('status');
 
 /* ================================================================
@@ -243,7 +232,6 @@ function initScene(volTex) {
       uBrightness: {value: 0.7},
       uGamma:      {value: 1.0},
       uThreshold:  {value: 0.02},
-      uColorMode:  {value: 2},
     },
     vertexShader,
     fragmentShader,
@@ -270,47 +258,6 @@ function updateCamera() {
     orbitRadius * Math.cos(ph),
     orbitRadius * Math.sin(ph) * Math.cos(th));
   camera.lookAt(0, 0, 0);
-}
-
-/* ================================================================
-   Mouse orbit
-   ================================================================ */
-function initMouse() {
-  const c = document.getElementById('viewer');
-  c.addEventListener('mousedown', e => {
-    isDragging = true; lastMouse = {x: e.clientX, y: e.clientY};
-  });
-  c.addEventListener('mousemove', e => {
-    if (!isDragging) return;
-    orbitTheta -= (e.clientX - lastMouse.x) * 0.005;
-    orbitPhi = Math.max(0.15, Math.min(Math.PI-0.15,
-                orbitPhi - (e.clientY - lastMouse.y) * 0.005));
-    lastMouse = {x: e.clientX, y: e.clientY};
-    updateCamera();
-  });
-  c.addEventListener('mouseup',    () => isDragging = false);
-  c.addEventListener('mouseleave', () => isDragging = false);
-  c.addEventListener('wheel', e => {
-    orbitRadius = Math.max(0.8, Math.min(5, orbitRadius + e.deltaY * 0.002));
-    updateCamera();
-  }, {passive: true});
-  // Touch support
-  c.addEventListener('touchstart', e => {
-    if (e.touches.length === 1) {
-      isDragging = true;
-      lastMouse = {x: e.touches[0].clientX, y: e.touches[0].clientY};
-    }
-  }, {passive: true});
-  c.addEventListener('touchmove', e => {
-    if (!isDragging || e.touches.length !== 1) return;
-    const t = e.touches[0];
-    orbitTheta -= (t.clientX - lastMouse.x) * 0.005;
-    orbitPhi = Math.max(0.15, Math.min(Math.PI-0.15,
-                orbitPhi - (t.clientY - lastMouse.y) * 0.005));
-    lastMouse = {x: t.clientX, y: t.clientY};
-    updateCamera();
-  }, {passive: true});
-  c.addEventListener('touchend', () => isDragging = false);
 }
 
 /* ================================================================
@@ -390,7 +337,7 @@ function initUI() {
       material.uniforms[uni].value = v;
     });
   }
-  // sensitivity (display only, used in tickTracking)
+  // sensitivity
   document.getElementById('sensitivity').addEventListener('input', e => {
     document.getElementById('v-sens').textContent =
       parseFloat(e.target.value).toFixed(2);
@@ -400,6 +347,26 @@ function initUI() {
     const v = parseFloat(e.target.value);
     document.getElementById('v-zscale').textContent = v.toFixed(2);
     mesh.scale.z = v;
+  });
+  // zoom
+  document.getElementById('zoom').addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    document.getElementById('v-zoom').textContent = v.toFixed(1);
+    orbitRadius = BASE_DIST / v;
+    updateCamera();
+  });
+  // rotation
+  document.getElementById('rot-h').addEventListener('input', e => {
+    const deg = parseFloat(e.target.value);
+    document.getElementById('v-roth').textContent = deg.toFixed(0);
+    orbitTheta = deg * Math.PI / 180;
+    updateCamera();
+  });
+  document.getElementById('rot-v').addEventListener('input', e => {
+    const deg = parseFloat(e.target.value);
+    document.getElementById('v-rotv').textContent = deg.toFixed(0);
+    orbitPhi = Math.PI / 2 - deg * Math.PI / 180;
+    updateCamera();
   });
   // webcam toggle
   document.getElementById('webcam-btn').addEventListener('click', () => {
@@ -418,7 +385,6 @@ async function main() {
   try {
     const tex = await loadVolume();
     initScene(tex);
-    initMouse();
     initUI();
     (function loop() { requestAnimationFrame(loop); tickTracking(); renderer.render(scene, camera); })();
   } catch (e) { console.error(e); }
