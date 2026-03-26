@@ -177,8 +177,7 @@ void main() {
 
   if (maxVal < uThreshold) discard;
 
-  // Apply gamma first (compresses dynamic range), then brightness
-  float I = clamp(pow(maxVal, uGamma) * uBrightness, 0.0, 1.0);
+  float I = pow(clamp(maxVal * uBrightness, 0.0, 1.0), uGamma);
   fragColor = vec4(vec3(I), 1.0);
 }`;
 
