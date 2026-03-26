@@ -78,15 +78,6 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
     <label>Z Scale <span class="val" id="v-zscale">0.20</span></label>
     <input type="range" id="zscale" min="0.05" max="2" step="0.05" value="0.2">
   </div>
-  <div class="ctrl">
-    <label>Color Mode</label>
-    <select id="colormode">
-      <option value="0">Fluorescence (green)</option>
-      <option value="1">Depth-coded</option>
-      <option value="2">Grayscale</option>
-    </select>
-  </div>
-
   <hr style="border-color:#333; margin:10px 0;">
 
   <div class="ctrl">
@@ -248,7 +239,7 @@ function initScene(volTex) {
       uBrightness: {value: 0.7},
       uGamma:      {value: 1.0},
       uThreshold:  {value: 0.02},
-      uColorMode:  {value: 0},
+      uColorMode:  {value: 2},
     },
     vertexShader,
     fragmentShader,
@@ -390,10 +381,6 @@ function initUI() {
     const v = parseFloat(e.target.value);
     document.getElementById('v-zscale').textContent = v.toFixed(2);
     mesh.scale.z = v;
-  });
-  // color mode
-  document.getElementById('colormode').addEventListener('change', e => {
-    material.uniforms.uColorMode.value = parseInt(e.target.value);
   });
   // webcam toggle
   document.getElementById('webcam-btn').addEventListener('click', () => {
