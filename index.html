@@ -35,14 +35,19 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
 #webcam-btn:hover { background: #3a4a3a; }
 #webcam-btn.active { background: #4a2a2a; color: #f88; border-color: #5a4a4a; }
 
-#cam-preview {
-  position: fixed; bottom: 12px; right: 12px;
-  width: 160px; height: 120px; border-radius: 6px;
-  overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
-  display: none;
+#toggle-panel {
+  position: fixed; top: 12px; right: 12px;
+  width: 32px; height: 32px; border-radius: 6px;
+  background: rgba(20,20,30,0.85); border: 1px solid rgba(255,255,255,0.1);
+  color: #999; font-size: 18px; cursor: pointer;
+  display: none; align-items: center; justify-content: center;
+  z-index: 20; backdrop-filter: blur(8px);
 }
-#cam-preview video {
-  width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1);
+@media (max-width: 600px) {
+  #panel { display: none; top: 50px; right: 8px; left: 8px; width: auto; z-index: 10; }
+  #panel.open { display: block; }
+  #toggle-panel { display: flex; }
+  #info { top: auto; bottom: 32px; }
 }
 
 #status {
@@ -87,9 +92,8 @@ body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overfl
   <button id="webcam-btn">Start Webcam Tracking</button>
 </div>
 
-<div id="cam-preview">
-  <video id="webcam" autoplay playsinline muted></video>
-</div>
+<video id="webcam" style="display:none" autoplay playsinline muted></video>
+<button id="toggle-panel">&#9881;</button>
 
 <div id="status">Loading volume...</div>
 <div id="info">Drag: rotate &bull; Scroll: zoom</div>
@@ -290,6 +294,23 @@ function initMouse() {
     orbitRadius = Math.max(0.8, Math.min(5, orbitRadius + e.deltaY * 0.002));
     updateCamera();
   }, {passive: true});
+  // Touch support
+  c.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      isDragging = true;
+      lastMouse = {x: e.touches[0].clientX, y: e.touches[0].clientY};
+    }
+  }, {passive: true});
+  c.addEventListener('touchmove', e => {
+    if (!isDragging || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    orbitTheta -= (t.clientX - lastMouse.x) * 0.005;
+    orbitPhi = Math.max(0.15, Math.min(Math.PI-0.15,
+                orbitPhi - (t.clientY - lastMouse.y) * 0.005));
+    lastMouse = {x: t.clientX, y: t.clientY};
+    updateCamera();
+  }, {passive: true});
+  c.addEventListener('touchend', () => isDragging = false);
 }
 
 /* ================================================================
@@ -316,7 +337,6 @@ async function startTracking() {
     video.srcObject = webcamStream;
     await video.play();
 
-    document.getElementById('cam-preview').style.display = 'block';
     document.getElementById('webcam-btn').textContent = 'Stop Tracking';
     document.getElementById('webcam-btn').classList.add('active');
     statusEl.textContent = 'Head tracking active';
@@ -331,7 +351,6 @@ function stopTracking() {
   video.srcObject = null;
   faceLandmarker = null;
   smoothHeadX = smoothHeadY = headOffsetX = headOffsetY = 0;
-  document.getElementById('cam-preview').style.display = 'none';
   const btn = document.getElementById('webcam-btn');
   btn.textContent = 'Start Webcam Tracking'; btn.classList.remove('active');
   statusEl.textContent = 'Tracking stopped';
@@ -385,6 +404,10 @@ function initUI() {
   // webcam toggle
   document.getElementById('webcam-btn').addEventListener('click', () => {
     webcamStream ? stopTracking() : startTracking();
+  });
+  // mobile panel toggle
+  document.getElementById('toggle-panel').addEventListener('click', () => {
+    document.getElementById('panel').classList.toggle('open');
   });
 }
 
