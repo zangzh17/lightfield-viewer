@@ -1,5 +1,5 @@
 [
-  {"id": "vessels_NIR_II", "name": "Vessels (NIR-II)"},
   {"id": "beads_2", "name": "Sparse Beads"},
-  {"id": "dense_beads", "name": "Dense Beads"}
+  {"id": "dense_beads", "name": "Dense Beads"},
+  {"id": "vessels_NIR_II", "name": "Vessels (NIR-II)"}
 ]
