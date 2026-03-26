@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLIM Volume Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #ccc; font-family: system-ui, sans-serif; overflow: hidden; }
+#viewer { width: 100vw; height: 100vh; display: block; }
+
+#panel {
+  position: fixed; top: 12px; right: 12px;
+  width: 240px; background: rgba(20,20,30,0.92);
+  border-radius: 8px; padding: 14px;
+  font-size: 12px; backdrop-filter: blur(8px);
+  border: 1px solid rgba(255,255,255,0.08);
+  user-select: none;
+}
+#panel h3 { font-size: 13px; color: #8f8; margin-bottom: 10px; font-weight: 500; }
+.ctrl { margin-bottom: 8px; }
+.ctrl label { display: block; margin-bottom: 2px; color: #999; font-size: 11px; }
+.ctrl input[type=range] { width: 100%; accent-color: #6a6; }
+.ctrl select {
+  width: 100%; background: #222; color: #ccc;
+  border: 1px solid #444; padding: 3px; border-radius: 3px;
+}
+.ctrl .val { float: right; color: #aaa; font-size: 11px; }
+
+#webcam-btn {
+  width: 100%; padding: 6px; margin-top: 4px;
+  background: #2a3a2a; color: #8f8; border: 1px solid #4a5a4a;
+  border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+#webcam-btn:hover { background: #3a4a3a; }
+#webcam-btn.active { background: #4a2a2a; color: #f88; border-color: #5a4a4a; }
+
+#cam-preview {
+  position: fixed; bottom: 12px; right: 12px;
+  width: 160px; height: 120px; border-radius: 6px;
+  overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
+  display: none;
+}
+#cam-preview video {
+  width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1);
+}
+
+#status {
+  position: fixed; bottom: 12px; left: 12px;
+  color: #666; font-size: 11px; font-family: monospace;
+}
+#info {
+  position: fixed; top: 12px; left: 12px;
+  color: #555; font-size: 11px;
+}
+</style>
+</head>
+<body>
+
+<canvas id="viewer"></canvas>
+
+<div id="panel">
+  <h3>SLIM Volume Viewer</h3>
+
+  <div class="ctrl">
+    <label>Brightness <span class="val" id="v-bright">0.7</span></label>
+    <input type="range" id="brightness" min="0.1" max="5" step="0.1" value="0.7">
+  </div>
+  <div class="ctrl">
+    <label>Gamma <span class="val" id="v-gamma">1.00</span></label>
+    <input type="range" id="gamma" min="0.1" max="2" step="0.05" value="1.0">
+  </div>
+  <div class="ctrl">
+    <label>Threshold <span class="val" id="v-thresh">0.02</span></label>
+    <input type="range" id="threshold" min="0" max="0.3" step="0.005" value="0.02">
+  </div>
+  <div class="ctrl">
+    <label>Z Scale <span class="val" id="v-zscale">0.20</span></label>
+    <input type="range" id="zscale" min="0.05" max="2" step="0.05" value="0.2">
+  </div>
+  <div class="ctrl">
+    <label>Color Mode</label>
+    <select id="colormode">
+      <option value="0">Fluorescence (green)</option>
+      <option value="1">Depth-coded</option>
+      <option value="2">Grayscale</option>
+    </select>
+  </div>
+
+  <hr style="border-color:#333; margin:10px 0;">
+
+  <div class="ctrl">
+    <label>Tracking Sensitivity <span class="val" id="v-sens">0.80</span></label>
+    <input type="range" id="sensitivity" min="0" max="2.0" step="0.05" value="0.8">
+  </div>
+  <button id="webcam-btn">Start Webcam Tracking</button>
+</div>
+
+<div id="cam-preview">
+  <video id="webcam" autoplay playsinline muted></video>
+</div>
+
+<div id="status">Loading volume...</div>
+<div id="info">Drag: rotate &bull; Scroll: zoom</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.167.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ================================================================
+   Shaders
+   ================================================================ */
+const vertexShader = `
+out vec3 vOrigin;
+out vec3 vDirection;
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vOrigin = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;
+  vDirection = position - vOrigin;
+}`;
+
+const fragmentShader = `
+precision highp float;
+precision highp sampler3D;
+
+in vec3 vOrigin;
+in vec3 vDirection;
+out vec4 fragColor;
+
+uniform sampler3D uVolume;
+uniform float uBrightness;
+uniform float uGamma;
+uniform float uThreshold;
+uniform int uColorMode;
+
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+vec2 intersectBox(vec3 orig, vec3 dir) {
+  vec3 inv = 1.0 / dir;
+  vec3 t0 = (-0.5 - orig) * inv;
+  vec3 t1 = ( 0.5 - orig) * inv;
+  vec3 tMin = min(t0, t1);
+  vec3 tMax = max(t0, t1);
+  return vec2(max(max(tMin.x, tMin.y), tMin.z),
+              min(min(tMax.x, tMax.y), tMax.z));
+}
+
+void main() {
+  vec3 rayDir = normalize(vDirection);
+  vec2 bounds = intersectBox(vOrigin, rayDir);
+  if (bounds.x >= bounds.y) discard;
+  bounds.x = max(bounds.x, 0.0);
+
+  float maxVal = 0.0;
+  float maxDepth = 0.0;
+  const int STEPS = 256;
+  float dt = (bounds.y - bounds.x) / float(STEPS);
+
+  for (int i = 0; i < STEPS; i++) {
+    vec3 p = vOrigin + rayDir * (bounds.x + float(i) * dt);
+    vec3 tc = p + 0.5;
+    tc.y = 1.0 - tc.y;               // flip Y for image convention
+    float val = texture(uVolume, tc).r;
+    if (val > maxVal) { maxVal = val; maxDepth = tc.z; }
+  }
+
+  if (maxVal < uThreshold) discard;
+
+  float I = pow(clamp(maxVal * uBrightness, 0.0, 1.0), uGamma);
+
+  vec3 color;
+  if (uColorMode == 0)      color = vec3(I*0.15, I, I*0.12);   // fluorescence green
+  else if (uColorMode == 1) color = hsv2rgb(vec3(maxDepth*0.7, 0.85, I)); // depth-coded
+  else                       color = vec3(I);                    // grayscale
+
+  fragColor = vec4(color, 1.0);
+}`;
+
+/* ================================================================
+   App state
+   ================================================================ */
+let camera, scene, renderer, mesh, material;
+let orbitTheta = 0.3, orbitPhi = 1.25, orbitRadius = 2.2;
+let headOffsetX = 0, headOffsetY = 0;
+let smoothHeadX = 0, smoothHeadY = 0;
+let isDragging = false, lastMouse = {x:0, y:0};
+let faceLandmarker = null, webcamStream = null;
+const video   = document.getElementById('webcam');
+const statusEl = document.getElementById('status');
+
+/* ================================================================
+   Volume loading
+   ================================================================ */
+async function loadVolume() {
+  const metaResp = await fetch('data/volume_meta.json');
+  if (!metaResp.ok) {
+    statusEl.textContent = 'volume_meta.json not found — run export_volume.py first';
+    throw new Error('no metadata');
+  }
+  const meta = await metaResp.json();
+  const {width, height, depth} = meta;
+
+  const raw = await (await fetch('data/volume.raw')).arrayBuffer();
+  const data = new Uint8Array(raw);
+
+  const tex = new THREE.Data3DTexture(data, width, height, depth);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = tex.wrapR = THREE.ClampToEdgeWrapping;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+
+  statusEl.textContent = `Volume ${width}\u00d7${height}\u00d7${depth} loaded`;
+  return tex;
+}
+
+/* ================================================================
+   Three.js scene
+   ================================================================ */
+function initScene(volTex) {
+  const canvas = document.getElementById('viewer');
+  renderer = new THREE.WebGLRenderer({canvas, antialias: true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000);
+
+  camera = new THREE.PerspectiveCamera(
+    45, window.innerWidth / window.innerHeight, 0.01, 100);
+  scene = new THREE.Scene();
+
+  material = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: {
+      uVolume:     {value: volTex},
+      uBrightness: {value: 0.7},
+      uGamma:      {value: 1.0},
+      uThreshold:  {value: 0.02},
+      uColorMode:  {value: 0},
+    },
+    vertexShader,
+    fragmentShader,
+    side: THREE.BackSide,
+  });
+
+  mesh = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), material);
+  mesh.scale.z = 0.2;
+  scene.add(mesh);
+  updateCamera();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+
+function updateCamera() {
+  const th = orbitTheta + headOffsetX;
+  const ph = orbitPhi   + headOffsetY;
+  camera.position.set(
+    orbitRadius * Math.sin(ph) * Math.sin(th),
+    orbitRadius * Math.cos(ph),
+    orbitRadius * Math.sin(ph) * Math.cos(th));
+  camera.lookAt(0, 0, 0);
+}
+
+/* ================================================================
+   Mouse orbit
+   ================================================================ */
+function initMouse() {
+  const c = document.getElementById('viewer');
+  c.addEventListener('mousedown', e => {
+    isDragging = true; lastMouse = {x: e.clientX, y: e.clientY};
+  });
+  c.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    orbitTheta -= (e.clientX - lastMouse.x) * 0.005;
+    orbitPhi = Math.max(0.15, Math.min(Math.PI-0.15,
+                orbitPhi - (e.clientY - lastMouse.y) * 0.005));
+    lastMouse = {x: e.clientX, y: e.clientY};
+    updateCamera();
+  });
+  c.addEventListener('mouseup',    () => isDragging = false);
+  c.addEventListener('mouseleave', () => isDragging = false);
+  c.addEventListener('wheel', e => {
+    orbitRadius = Math.max(0.8, Math.min(5, orbitRadius + e.deltaY * 0.002));
+    updateCamera();
+  }, {passive: true});
+}
+
+/* ================================================================
+   Head tracking (MediaPipe)
+   ================================================================ */
+async function startTracking() {
+  statusEl.textContent = 'Loading face model...';
+  try {
+    const V = await import(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+    const fs = await V.FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    faceLandmarker = await V.FaceLandmarker.createFromOptions(fs, {
+      baseOptions: {
+        modelAssetPath:
+          'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+        delegate: 'GPU',
+      },
+      runningMode: 'VIDEO', numFaces: 1,
+    });
+
+    webcamStream = await navigator.mediaDevices.getUserMedia(
+      {video: {width: 320, height: 240, facingMode: 'user'}});
+    video.srcObject = webcamStream;
+    await video.play();
+
+    document.getElementById('cam-preview').style.display = 'block';
+    document.getElementById('webcam-btn').textContent = 'Stop Tracking';
+    document.getElementById('webcam-btn').classList.add('active');
+    statusEl.textContent = 'Head tracking active';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Tracking failed: ' + err.message;
+  }
+}
+
+function stopTracking() {
+  if (webcamStream) { webcamStream.getTracks().forEach(t => t.stop()); webcamStream = null; }
+  video.srcObject = null;
+  faceLandmarker = null;
+  smoothHeadX = smoothHeadY = headOffsetX = headOffsetY = 0;
+  document.getElementById('cam-preview').style.display = 'none';
+  const btn = document.getElementById('webcam-btn');
+  btn.textContent = 'Start Webcam Tracking'; btn.classList.remove('active');
+  statusEl.textContent = 'Tracking stopped';
+  updateCamera();
+}
+
+function tickTracking() {
+  if (!faceLandmarker || video.readyState < 2) return;
+  const sens = parseFloat(document.getElementById('sensitivity').value);
+  const res  = faceLandmarker.detectForVideo(video, performance.now());
+  if (res.faceLandmarks && res.faceLandmarks.length) {
+    const nose = res.faceLandmarks[0][1];
+    const rx = -(nose.x - 0.5) * sens;
+    const ry = -(nose.y - 0.5) * sens * 0.7;
+    const a = 0.15;
+    smoothHeadX += (rx - smoothHeadX) * a;
+    smoothHeadY += (ry - smoothHeadY) * a;
+    headOffsetX = smoothHeadX;
+    headOffsetY = smoothHeadY;
+    updateCamera();
+  }
+}
+
+/* ================================================================
+   UI bindings
+   ================================================================ */
+function initUI() {
+  const pairs = [
+    ['brightness', 'uBrightness', 'v-bright', v => v.toFixed(1)],
+    ['gamma',      'uGamma',      'v-gamma',  v => v.toFixed(2)],
+    ['threshold',  'uThreshold',  'v-thresh', v => v.toFixed(3)],
+  ];
+  for (const [id, uni, disp, fmt] of pairs) {
+    document.getElementById(id).addEventListener('input', e => {
+      const v = parseFloat(e.target.value);
+      document.getElementById(disp).textContent = fmt(v);
+      material.uniforms[uni].value = v;
+    });
+  }
+  // sensitivity (display only, used in tickTracking)
+  document.getElementById('sensitivity').addEventListener('input', e => {
+    document.getElementById('v-sens').textContent =
+      parseFloat(e.target.value).toFixed(2);
+  });
+  // z-scale
+  document.getElementById('zscale').addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    document.getElementById('v-zscale').textContent = v.toFixed(2);
+    mesh.scale.z = v;
+  });
+  // color mode
+  document.getElementById('colormode').addEventListener('change', e => {
+    material.uniforms.uColorMode.value = parseInt(e.target.value);
+  });
+  // webcam toggle
+  document.getElementById('webcam-btn').addEventListener('click', () => {
+    webcamStream ? stopTracking() : startTracking();
+  });
+}
+
+/* ================================================================
+   Main
+   ================================================================ */
+async function main() {
+  try {
+    const tex = await loadVolume();
+    initScene(tex);
+    initMouse();
+    initUI();
+    (function loop() { requestAnimationFrame(loop); tickTracking(); renderer.render(scene, camera); })();
+  } catch (e) { console.error(e); }
+}
+main();
+</script>
+</body>
+</html>
